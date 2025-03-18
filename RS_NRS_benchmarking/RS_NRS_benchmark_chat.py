@@ -20,7 +20,6 @@ Usage:
     python RS_NRS_benchmark_chat.py
     This will process the 'test_set.csv' input file, classify each README, and output the results to 'chatgpt_classified_results.csv'.
 """
-
 import openai
 import pandas as pd
 import time
@@ -32,6 +31,7 @@ import nltk
 # Download necessary NLTK resources
 nltk.download("punkt")
 
+
 # Retrieve the OpenAI API key from environment variables
 api_key = os.getenv('OPENAI_API_KEY')
 
@@ -39,85 +39,87 @@ api_key = os.getenv('OPENAI_API_KEY')
 if not api_key:
     raise ValueError("OpenAI API key not found. Please set the 'OPENAI_API_KEY' environment variable.")
 
-# Initialize the OpenAI client with the API key
 client = openai.Client(api_key=api_key)
 
 def preprocess_text(text):
-    """
-    Preprocesses the input text by keeping only alphabetic characters and normalizing whitespace.
-    
-    Args:
-        text (str): The input text to preprocess.
-        
-    Returns:
-        str: The cleaned text containing only alphabetic characters and normalized whitespace.
-    """
+    """Cleans text while preserving key content."""
     text = re.sub(r'[^a-zA-Z\s]', '', text)  # Keep only letters and spaces
     text = re.sub(r'\s+', ' ', text).strip()  # Normalize whitespace
     return text
 
-def classify_with_chatgpt(readme_content, max_length=500):
-    """
-    Classifies a README file as either 'Research' or 'Non-Research' using OpenAI's GPT-4 model.
+
+def split_into_chunks(text, max_tokens=4000):
+    """Splits text into smaller chunks to fit within OpenAI's context limit."""
+    words = text.split()
+    chunks = []
+    current_chunk = []
+    current_length = 0
     
-    Args:
-        readme_content (str): The content of the README file to classify.
-        max_length (int): The maximum length of the input text to be passed to the GPT model (default 500).
-        
-    Returns:
-        str: The classification result, either 'Research', 'Non-Research', or 'Unknown' if classification fails.
-    """
-    preprocessed_content = preprocess_text(readme_content)
-    truncated_content = preprocessed_content[:max_length] if isinstance(preprocessed_content, str) else ""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": 
-                    "You are a classifier that identifies whether software README files describe research or non-research software. "
-                    "Respond with only 'Research' or 'Non-Research'."},
-                {"role": "user", "content": f"Classify the following README as 'Research' or 'Non-Research':\n\n{truncated_content}"}
-            ],
-            max_tokens=5,
-            temperature=0
-        )
-        result = response.choices[0].message.content.strip()
-
-        if result.lower() in ["research", "'research'", '"research"']:
-            return "Research"
-        elif result.lower() in ["non-research", "'non-research'", '"non-research"']:
-            return "Non-Research"
+    for word in words:
+        word_length = len(word) + 1  # Include space
+        if current_length + word_length > max_tokens:
+            chunks.append(" ".join(current_chunk))
+            current_chunk = [word]
+            current_length = word_length
         else:
-            return "Unknown"
-    except RateLimitError as e:
-        print(f"Rate limit reached: {e}")
-        delay = int(e.response.headers.get("Retry-After", 5))
-        print(f"Retrying after {delay} seconds...")
-        time.sleep(delay)
-        return classify_with_chatgpt(readme_content, max_length)
-    except APIConnectionError as e:
-        print(f"API connection error: {e}")
-        return None
-    except OpenAIError as e:
-        print(f"OpenAI API error: {e}")
-        return None
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
+            current_chunk.append(word)
+            current_length += word_length
+    
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+    
+    return chunks
+
+
+def classify_with_chatgpt(readme_content):
+    """Classifies a README file using OpenAI GPT model, handling long text via chunking."""
+    preprocessed_content = preprocess_text(readme_content)
+    chunks = split_into_chunks(preprocessed_content)
+    final_classification = None
+    
+    for chunk in chunks:
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are a classifier that identifies whether software README files describe research or non-research software. Respond with only 'Research' or 'Non-Research'."},
+                    {"role": "user", "content": f"Classify the following README as 'Research' or 'Non-Research':\n\n{chunk}"}
+                ],
+                max_tokens=5,
+                temperature=0
+            )
+            result = response.choices[0].message.content.strip()
+
+            if result.lower() in ["research", "'research'", '"research"']:
+                final_classification = "Research"
+            elif result.lower() in ["non-research", "'non-research'", '"non-research"']:
+                final_classification = "Non-Research"
+
+            # If any chunk is classified as 'Research', assume the entire README is research
+            if final_classification == "Research":
+                break
+
+        except RateLimitError as e:
+            print(f"Rate limit reached: {e}")
+            delay = int(e.response.headers.get("Retry-After", 5))
+            print(f"Retrying after {delay} seconds...")
+            time.sleep(delay)
+            return classify_with_chatgpt(readme_content)
+        except APIConnectionError as e:
+            print(f"API connection error: {e}")
+            return None
+        except OpenAIError as e:
+            print(f"OpenAI API error: {e}")
+            return None
+        except Exception as e:
+            print(f"Error: {e}")
+            return None
+
+    return final_classification or "Unknown"
+
 
 def process_in_batches(df, batch_size, output_file):
-    """
-    Processes the dataset in manageable batches to avoid hitting API rate limits and save progress.
-    
-    Args:
-        df (DataFrame): The pandas DataFrame containing the dataset.
-        batch_size (int): The number of records to process in each batch.
-        output_file (str): The path to save the output CSV file with the classified results.
-        
-    Returns:
-        list: The list of results after processing all batches.
-    """
+    """Processes the dataset in manageable batches."""
     results = []
     total_batches = (len(df) + batch_size - 1) // batch_size
 
@@ -139,6 +141,7 @@ def process_in_batches(df, batch_size, output_file):
 
     return results
 
+
 # Main script execution
 if __name__ == "__main__":
     test_data_path = "test_set.csv"
@@ -148,7 +151,7 @@ if __name__ == "__main__":
     try:
         df = pd.read_csv(test_data_path)
 
-        required_columns = ['Raw README Content', 'Label']  # ✅ Updated to match your CSV
+        required_columns = ['Raw README Content', 'Label']
         if not all(col in df.columns for col in required_columns):
             raise ValueError(f"Missing required columns. Expected: {required_columns}")
 
@@ -161,3 +164,4 @@ if __name__ == "__main__":
         print(f"File '{test_data_path}' not found.")
     except Exception as e:
         print(f"An error occurred: {e}")
+
